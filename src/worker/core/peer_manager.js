@@ -330,6 +330,36 @@ export class PeerManager {
     return peers ? Array.from(peers.entries()) : [];
   }
 
+  // Learn a client's virtual IPv4 by observing the source address of the raw
+  // IP packets it sends. Clients do not report their virtual IP to public
+  // servers in route syncs, so without this the relay cannot publish routable
+  // peer info and relayed data has nowhere to go.
+  learnVirtualIp(groupKey, peerId, ipv4U32) {
+    if (ipv4U32 === null || ipv4U32 === undefined) return false;
+    const infos = this._getPeerInfosMap(groupKey, true);
+    let info = infos.get(peerId);
+    if (!info) {
+      info = makeStubPeerInfo(peerId, 24);
+      infos.set(peerId, info);
+    }
+    const prev = info.ipv4Addr && typeof info.ipv4Addr.addr === 'number' ? (info.ipv4Addr.addr >>> 0) : null;
+    if (prev === (ipv4U32 >>> 0)) return false;
+    info.ipv4Addr = { addr: ipv4U32 >>> 0 };
+    if (!info.networkLength) info.networkLength = 24;
+    info.version = (info.version || 1) + 1;
+    info.lastUpdate = { seconds: Math.floor(Date.now() / 1000), nanos: 0 };
+    return true;
+  }
+
+  getPeerIdByIp(groupKey, ipv4U32) {
+    const infos = this._getPeerInfosMap(groupKey, false);
+    if (!infos) return null;
+    for (const [pid, info] of infos.entries()) {
+      if (info && info.ipv4Addr && (info.ipv4Addr.addr >>> 0) === (ipv4U32 >>> 0)) return pid;
+    }
+    return null;
+  }
+
   updatePeerInfo(groupKey, peerId, info) {
     const infos = this._getPeerInfosMap(groupKey, true);
     const isNew = !infos.has(peerId);

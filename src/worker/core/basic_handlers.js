@@ -1,4 +1,4 @@
-import { MAGIC, VERSION, MY_PEER_ID, PacketType } from './constants.js';
+import { MAGIC, VERSION, MY_PEER_ID, PacketType, HEADER_SIZE } from './constants.js';
 import { createHeader } from './packet.js';
 import { wrapPacket, randomU64String } from './crypto.js';
 
@@ -109,11 +109,39 @@ export function handlePing(ws, header, payload) {
 }
 
 export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
-  const targetPeerId = header.toPeerId;
-  const targetWs = pm.getPeerWs(targetPeerId, sourceWs && sourceWs.groupKey);
+  const groupKey = sourceWs && sourceWs.groupKey;
+  const payload = fullMessage.subarray(HEADER_SIZE);
+  const isIpv4Packet = header.packetType === PacketType.Data && payload.length >= 20 && (payload[0] >> 4) === 4;
+
+  // Data packets are raw IPv4 packets: learn the sender's virtual IP from the
+  // source address and publish it, otherwise relayed routes carry no address.
+  if (isIpv4Packet && sourceWs && sourceWs.peerId) {
+    const srcIp = payload.readUInt32BE(12);
+    try {
+      if (pm.learnVirtualIp(groupKey, sourceWs.peerId, srcIp)) {
+        pm.broadcastRouteUpdate(types, groupKey, undefined, { forceFull: true });
+      }
+    } catch (e) {
+      console.error(`learnVirtualIp failed: ${e.message}`);
+    }
+  }
+
+  let targetPeerId = header.toPeerId;
+  let targetWs = pm.getPeerWs(targetPeerId, groupKey);
+
+  // Clients keep sending to a peer's previous peer id after it reconnects with
+  // a new one; fall back to resolving the destination by virtual IP.
+  if ((!targetWs || targetWs.readyState !== WS_OPEN) && isIpv4Packet) {
+    const dstIp = payload.readUInt32BE(16);
+    const altPeerId = pm.getPeerIdByIp(groupKey, dstIp);
+    if (altPeerId !== null && altPeerId !== targetPeerId) {
+      targetPeerId = altPeerId;
+      targetWs = pm.getPeerWs(targetPeerId, groupKey);
+    }
+  }
 
   if (targetWs && targetWs.readyState === WS_OPEN) {
-    const srcGroup = sourceWs && sourceWs.groupKey;
+    const srcGroup = groupKey;
     const dstGroup = targetWs && targetWs.groupKey;
     if (srcGroup && dstGroup && srcGroup !== dstGroup) {
       return;
@@ -129,6 +157,5 @@ export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
         console.error(`Broadcast after forward failure failed: ${err.message}`);
       }
     }
-  } else {
   }
 }
