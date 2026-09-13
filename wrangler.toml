@@ -17,3 +17,9 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
+
+
+
+[[routes]]
+pattern = "easytier.ligdesign.win"
+custom_domain = true
