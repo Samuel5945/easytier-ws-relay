@@ -547,6 +547,17 @@ export class PeerManager {
       // ignore
     }
   }
+
+  // Drop all state. The module singleton outlives individual Durable Object
+  // instances inside an isolate; on instance recreation the previous instance's
+  // WebSocket wrappers must not be reused (Cloudflare throws "Cannot perform
+  // I/O on behalf of a different Durable Object" when they are).
+  reset() {
+    this.peersByGroup.clear();
+    this.peerInfosByGroup.clear();
+    this.routeSessions.clear();
+    this.peerConnVersions.clear();
+  }
 }
 
 let peerManagerInstance = null;

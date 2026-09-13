@@ -1,14 +1,14 @@
 import { MAGIC, VERSION, MY_PEER_ID, PacketType } from './constants.js';
 import { createHeader } from './packet.js';
-import { getPeerManager } from './peer_manager.js';
 import { wrapPacket, randomU64String } from './crypto.js';
 
 const WS_OPEN = (typeof WebSocket !== 'undefined' && WebSocket.OPEN) ? WebSocket.OPEN : 1;
 
-// Record the first registered digest per network name; later mismatched digest will be rejected
-const networkDigestRegistry = new Map();
-
-export function handleHandshake(ws, header, payload, types) {
+// pm and registry are owned by the RelayRoom Durable Object instance.
+// They must NOT come from module-level singletons: the module scope outlives
+// DO instances inside an isolate, and reusing a previous instance's WebSocket
+// throws "Cannot perform I/O on behalf of a different Durable Object".
+export function handleHandshake(ws, header, payload, types, pm, networkDigestRegistry) {
   try {
     const req = types.HandshakeRequest.decode(payload);
     try {
@@ -54,7 +54,6 @@ export function handleHandshake(ws, header, payload, types) {
 
     ws.groupKey = groupKey;
     ws.peerId = req.myPeerId;
-    const pm = getPeerManager();
     pm.addPeer(req.myPeerId, ws);
     pm.updatePeerInfo(ws.groupKey, req.myPeerId, {
       peerId: req.myPeerId,
@@ -75,11 +74,21 @@ export function handleHandshake(ws, header, payload, types) {
     if (ws.weAreInitiator === undefined) {
       ws.weAreInitiator = false;
     }
+    // Persist identity in the hibernation attachment so that after the DO
+    // instance is evicted and recreated, _restoreSocket can re-register this
+    // connection in the new instance's PeerManager.
+    try {
+      ws.serializeAttachment?.({
+        peerId: ws.peerId,
+        groupKey: ws.groupKey,
+        domainName: ws.domainName,
+        serverSessionId: ws.serverSessionId,
+      });
+    } catch (_) { }
 
     setTimeout(() => {
       try {
         if (ws.readyState === WS_OPEN) {
-          const pm = getPeerManager();
           pm.pushRouteUpdateTo(req.myPeerId, ws, types, { forceFull: true });
           pm.broadcastRouteUpdate(types, ws.groupKey, req.myPeerId, { forceFull: true });
         }
@@ -99,9 +108,8 @@ export function handlePing(ws, header, payload) {
   ws.send(msg);
 }
 
-export function handleForwarding(sourceWs, header, fullMessage, types) {
+export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
   const targetPeerId = header.toPeerId;
-  const pm = getPeerManager();
   const targetWs = pm.getPeerWs(targetPeerId, sourceWs && sourceWs.groupKey);
 
   if (targetWs && targetWs.readyState === WS_OPEN) {

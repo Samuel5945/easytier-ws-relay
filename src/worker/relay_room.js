@@ -4,7 +4,7 @@ import { PacketType, HEADER_SIZE, MY_PEER_ID } from './core/constants.js';
 import { loadProtos } from './core/protos.js';
 import { handleHandshake, handlePing, handleForwarding } from './core/basic_handlers.js';
 import { handleRpcReq, handleRpcResp } from './core/rpc_handler.js';
-import { getPeerManager } from './core/peer_manager.js';
+import { PeerManager } from './core/peer_manager.js';
 import { randomU64String } from './core/crypto.js';
 
 export class RelayRoom {
@@ -12,8 +12,14 @@ export class RelayRoom {
     this.state = state;
     this.env = env;
     this.types = loadProtos();
-    this.peerManager = getPeerManager();
+    // Per-instance state. The module singleton outlives DO instances inside an
+    // isolate; reusing it would keep stale WebSocket handles from a previous
+    // instance and trigger "Cannot perform I/O on behalf of a different
+    // Durable Object" on forwarding.
+    this.peerManager = new PeerManager();
     this.peerManager.setTypes(this.types);
+    this.networkDigestRegistry = new Map();
+    this.peerCenterStateByGroup = new Map();
 
     // Restore sockets after hibernation to keep metadata
     this.state.getWebSockets().forEach((ws) => this._restoreSocket(ws));
@@ -67,7 +73,7 @@ export class RelayRoom {
       switch (header.packetType) {
         case PacketType.HandShake:
           console.log(`[ws] -> handleHandshake payload hex=${payload.toString('hex')}`);
-          handleHandshake(ws, header, payload, this.types);
+          handleHandshake(ws, header, payload, this.types, this.peerManager, this.networkDigestRegistry);
           break;
         case PacketType.Ping:
           handlePing(ws, header, payload);
@@ -80,32 +86,32 @@ export class RelayRoom {
             // no-op
           }
           if (header.toPeerId === undefined || header.toPeerId === null) {
-            handleRpcReq(ws, header, payload, this.types);
+            handleRpcReq(ws, header, payload, this.types, this.peerManager, this.peerCenterStateByGroup);
             break;
           }
           if (header.toPeerId === MY_PEER_ID) {
-            handleRpcReq(ws, header, payload, this.types);
+            handleRpcReq(ws, header, payload, this.types, this.peerManager, this.peerCenterStateByGroup);
             break;
           }
-          handleForwarding(ws, header, buffer, this.types);
+          handleForwarding(ws, header, buffer, this.types, this.peerManager);
           break;
         case PacketType.RpcResp:
           if (header.toPeerId === undefined || header.toPeerId === null || header.toPeerId === MY_PEER_ID) {
-            handleRpcResp(ws, header, payload, this.types);
+            handleRpcResp(ws, header, payload, this.types, this.peerManager);
             break;
           }
           // If toPeerId is not MY_PEER_ID, forward to the target peer
           if (header.packetType !== PacketType.Data) {
             console.log(`[ws] -> forward RpcResp type=${header.packetType} from=${header.fromPeerId} to=${header.toPeerId} len=${payload.length}`);
           }
-          handleForwarding(ws, header, buffer, this.types);
+          handleForwarding(ws, header, buffer, this.types, this.peerManager);
           break;
         case PacketType.Data:
         default:
           if (header.packetType !== PacketType.Data) {
             console.log(`[ws] -> forward type=${header.packetType} len=${payload.length}`);
           }
-          handleForwarding(ws, header, buffer, this.types);
+          handleForwarding(ws, header, buffer, this.types, this.peerManager);
       }
     } catch (e) {
       console.error('relay_room message handling error:', e);
