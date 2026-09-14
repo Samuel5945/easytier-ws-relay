@@ -138,26 +138,17 @@ export function handlePing(ws, header, payload) {
 export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
   const groupKey = sourceWs && sourceWs.groupKey;
   const payload = fullMessage.subarray(HEADER_SIZE);
-  const isIpv4Packet = header.packetType === PacketType.Data && looksLikeIpv4(payload);
 
-  // Data packets are raw IPv4 packets: learn the sender's virtual IP from the
-  // source address and publish it, otherwise relayed routes carry no address.
-  if (isIpv4Packet && sourceWs && sourceWs.peerId) {
-    const srcIp = payload.readUInt32BE(12);
-    try {
-      if (pm.learnVirtualIp(groupKey, sourceWs.peerId, srcIp)) {
-        pm.broadcastRouteUpdate(types, groupKey, undefined, { forceFull: true });
-      }
-    } catch (e) {
-      console.error(`learnVirtualIp failed: ${e.message}`);
-    }
-  }
+  // Virtual IPs come only from client route-sync reports (updatePeerInfo).
+  // Relayed Data payloads are end-to-end encrypted, so sniffing addresses
+  // from them would learn ciphertext garbage and poison route broadcasts.
+  const isIpv4Packet = header.packetType === PacketType.Data && looksLikeIpv4(payload);
 
   let targetPeerId = header.toPeerId;
   let targetWs = pm.getPeerWs(targetPeerId, groupKey);
 
   // Clients keep sending to a peer's previous peer id after it reconnects with
-  // a new one; fall back to resolving the destination by virtual IP.
+  // a new one; fall back to resolving the destination by reported virtual IP.
   if ((!targetWs || targetWs.readyState !== WS_OPEN) && isIpv4Packet) {
     const dstIp = payload.readUInt32BE(16);
     const altPeerId = pm.getPeerIdByIp(groupKey, dstIp);
