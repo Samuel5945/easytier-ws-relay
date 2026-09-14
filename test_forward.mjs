@@ -19,6 +19,7 @@ const ip = (s) => s.split('.').reduce((a, o) => ((a << 8) | +o) >>> 0, 0) >>> 0;
 function ipPacket(src, dst) {
   const p = Buffer.alloc(20);
   p[0] = 0x45;
+  p.writeUInt16BE(20, 2); // total length; looksLikeIpv4 validates it
   p.writeUInt32BE(src, 12);
   p.writeUInt32BE(dst, 16);
   return p;
@@ -50,3 +51,17 @@ console.log('T5 旧 ID 按目的 IP 兜底投递:', B.sent.length === before + 1
 A.sent.length = 0;
 pm.broadcastRouteUpdate(types, 'g', undefined, { forceFull: true });
 console.log('T6 广播发出消息:', A.sent.length > 0 && B.sent.length > 0);
+
+// 5. 公网源地址的数据包不得被学习（防误嗅探污染路由）
+const C = fakeWs(555);
+pm.addPeer(555, C);
+const pubPayload = ipPacket(ip('80.207.42.254'), ip('10.144.144.2'));
+const hPub = { fromPeerId: 555, toPeerId: 111, packetType: PacketType.Data, len: pubPayload.length };
+handleForwarding(C, hPub, Buffer.concat([createHeader(555, 111, PacketType.Data, pubPayload.length), pubPayload]), types, pm);
+console.log('T7 公网源地址不被学习:', pm.getPeerIdByIp('g', ip('80.207.42.254')) === null);
+
+// 6. 客户端上报的地址优先于嗅探值
+pm.updatePeerInfo('g', 555, { ...pm._getPeerInfosMap('g', true).get(555), ipv4Addr: { addr: ip('10.144.144.5') }, ipSource: 'report', version: 9 });
+const privPayload = ipPacket(ip('10.144.144.9'), ip('10.144.144.2'));
+handleForwarding(C, { fromPeerId: 555, toPeerId: 111, packetType: PacketType.Data, len: privPayload.length }, Buffer.concat([createHeader(555, 111, PacketType.Data, privPayload.length), privPayload]), types, pm);
+console.log('T8 上报地址不被嗅探覆盖:', pm.getPeerIdByIp('g', ip('10.144.144.5')) === 555 && pm.getPeerIdByIp('g', ip('10.144.144.9')) === null);

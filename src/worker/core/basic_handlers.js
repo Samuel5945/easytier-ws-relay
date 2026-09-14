@@ -4,6 +4,33 @@ import { wrapPacket, randomU64String } from './crypto.js';
 
 const WS_OPEN = (typeof WebSocket !== 'undefined' && WebSocket.OPEN) ? WebSocket.OPEN : 1;
 
+// Strict check that a Data payload is a plaintext IPv4 packet from the virtual
+// NIC. Encrypted/compressed or otherwise non-tunnel payloads must never be
+// mistaken for one: a mislearned source address poisons every route broadcast.
+function looksLikeIpv4(p) {
+  if (p.length < 20) return false;
+  if ((p[0] >> 4) !== 4) return false;
+  const ihl = p[0] & 0x0f;
+  if (ihl < 5 || ihl > 15) return false;
+  if (p.readUInt16BE(2) !== p.length) return false;
+  const src = p.readUInt32BE(12);
+  const dst = p.readUInt32BE(16);
+  if (src === 0 || dst === 0 || src === dst) return false;
+  return isPrivateU32(src);
+}
+
+// Virtual addresses are private ranges; a public-looking source is not tunnel traffic.
+function isPrivateU32(ip) {
+  const a = ip >>> 24;
+  const b = (ip >>> 16) & 0xff;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
 // pm and registry are owned by the RelayRoom Durable Object instance.
 // They must NOT come from module-level singletons: the module scope outlives
 // DO instances inside an isolate, and reusing a previous instance's WebSocket
@@ -111,7 +138,7 @@ export function handlePing(ws, header, payload) {
 export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
   const groupKey = sourceWs && sourceWs.groupKey;
   const payload = fullMessage.subarray(HEADER_SIZE);
-  const isIpv4Packet = header.packetType === PacketType.Data && payload.length >= 20 && (payload[0] >> 4) === 4;
+  const isIpv4Packet = header.packetType === PacketType.Data && looksLikeIpv4(payload);
 
   // Data packets are raw IPv4 packets: learn the sender's virtual IP from the
   // source address and publish it, otherwise relayed routes carry no address.

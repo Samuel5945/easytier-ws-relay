@@ -342,9 +342,13 @@ export class PeerManager {
       info = makeStubPeerInfo(peerId, 24);
       infos.set(peerId, info);
     }
+    // Addresses reported by clients in route syncs are authoritative;
+    // sniffed values must never overwrite them.
+    if (info.ipSource === 'report') return false;
     const prev = info.ipv4Addr && typeof info.ipv4Addr.addr === 'number' ? (info.ipv4Addr.addr >>> 0) : null;
     if (prev === (ipv4U32 >>> 0)) return false;
     info.ipv4Addr = { addr: ipv4U32 >>> 0 };
+    info.ipSource = 'sniff';
     if (!info.networkLength) info.networkLength = 24;
     info.version = (info.version || 1) + 1;
     info.lastUpdate = { seconds: Math.floor(Date.now() / 1000), nanos: 0 };
@@ -363,6 +367,9 @@ export class PeerManager {
   updatePeerInfo(groupKey, peerId, info) {
     const infos = this._getPeerInfosMap(groupKey, true);
     const isNew = !infos.has(peerId);
+    if (info && info.ipv4Addr && typeof info.ipv4Addr.addr === 'number') {
+      info.ipSource = 'report';
+    }
     infos.set(peerId, info);
     if (isNew) {
       this.bumpAllPeerConnVersions(groupKey);
