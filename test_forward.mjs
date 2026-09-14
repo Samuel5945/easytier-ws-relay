@@ -29,7 +29,7 @@ function dataMsg(from, to, src, dst) {
   const h = createHeader(from, to, PacketType.Data, payload.length);
   return [Buffer.concat([h, payload]), { fromPeerId: from, toPeerId: to, packetType: PacketType.Data, len: payload.length }];
 }
-// Virtual IPs enter the relay only through client route-sync reports.
+// Seed authoritative reported addresses for A and B.
 pm.updatePeerInfo('g', 111, { peerId: 111, ipv4Addr: { addr: ip('10.144.144.2') }, networkLength: 24, version: 1 });
 pm.updatePeerInfo('g', 333, { peerId: 333, ipv4Addr: { addr: ip('10.144.144.3') }, networkLength: 24, version: 1 });
 
@@ -38,31 +38,40 @@ let [m1, h1] = dataMsg(333, 111, '10.144.144.3', '10.144.144.2');
 handleForwarding(B, h1, m1, types, pm);
 console.log('T1 按 peer id 投递:', A.sent.some(b => b.equals(m1)));
 
-// 2. 旧 peer id + 明文目的 IP -> 按上报地址兜底投递
+// 2. 旧 peer id + 明文目的 IP -> 按地址兜底投递
 const before = B.sent.length;
 let [m2, h2] = dataMsg(111, 222, '10.144.144.2', '10.144.144.3');
 handleForwarding(A, h2, m2, types, pm);
 console.log('T2 旧 ID 按目的 IP 兜底投递:', B.sent.length === before + 1);
 
-// 3. 目的 IP 未上报且 peer id 不存在 -> 不投递
+// 3. 未上报地址的新 peer 发合法私网包 -> 被学习并可作为投递目标
 const C = fakeWs(555);
 pm.addPeer(555, C);
-let [m3, h3] = dataMsg(555, 999, '10.144.144.9', '10.144.144.8');
+let [m3, h3] = dataMsg(555, 111, '10.144.144.9', '10.144.144.2');
 handleForwarding(C, h3, m3, types, pm);
-console.log('T3 未知目的不投递:', A.sent.length === 1 && B.sent.length === before + 1);
+console.log('T3 合法私网源地址被学习:', pm.getPeerIdByIp('g', ip('10.144.144.9')) === 555);
 
-// 4. 数据面不再嗅探地址：未上报过 IP 的 peer 发任何包都不会获得地址映射
-let [m4, h4] = dataMsg(555, 111, '10.144.144.9', '10.144.144.2');
+// 4. 公网源地址（密文误判/脏数据特征）不被学习
+let [m4, h4] = dataMsg(555, 111, '80.207.42.254', '10.144.144.2');
 handleForwarding(C, h4, m4, types, pm);
-console.log('T4 不再嗅探源地址:', pm.getPeerIdByIp('g', ip('10.144.144.9')) === null);
+console.log('T4 公网源地址不被学习:', pm.getPeerIdByIp('g', ip('80.207.42.254')) === null);
 
-// 5. 密文样载荷（非合法 IP 头）不影响兜底逻辑、不产生映射
+// 5. 上报地址拥有最高权威：嗅探不得覆盖
+const D = fakeWs(777);
+pm.addPeer(777, D);
+pm.updatePeerInfo('g', 777, { peerId: 777, ipv4Addr: { addr: ip('10.144.144.7') }, networkLength: 24, version: 1 });
+let [m5, h5] = dataMsg(777, 111, '10.144.144.99', '10.144.144.2');
+handleForwarding(D, h5, m5, types, pm);
+console.log('T5 嗅探不覆盖上报地址:', pm.getPeerIdByIp('g', ip('10.144.144.7')) === 777 && pm.getPeerIdByIp('g', ip('10.144.144.99')) === null);
+
+// 6. 密文样载荷（非合法 IP 头）既不投递也不学习
 const cipher = Buffer.alloc(24, 0xab);
 const hC = { fromPeerId: 555, toPeerId: 999, packetType: PacketType.Data, len: cipher.length };
+const aBefore = A.sent.length, bBefore = B.sent.length;
 handleForwarding(C, hC, Buffer.concat([createHeader(555, 999, PacketType.Data, cipher.length), cipher]), types, pm);
-console.log('T5 密文载荷被安全忽略:', true);
+console.log('T6 密文载荷被安全忽略:', A.sent.length === aBefore && B.sent.length === bBefore && pm.getPeerIdByIp('g', ip('171.171.171.171')) === null);
 
-// 6. 路由广播正常发出
+// 7. 路由广播正常发出
 A.sent.length = 0; B.sent.length = 0;
 pm.broadcastRouteUpdate(types, 'g', undefined, { forceFull: true });
-console.log('T6 广播发出消息:', A.sent.length > 0 && B.sent.length > 0);
+console.log('T7 广播发出消息:', A.sent.length > 0 && B.sent.length > 0);

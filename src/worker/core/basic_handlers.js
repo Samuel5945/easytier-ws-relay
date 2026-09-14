@@ -139,10 +139,22 @@ export function handleForwarding(sourceWs, header, fullMessage, types, pm) {
   const groupKey = sourceWs && sourceWs.groupKey;
   const payload = fullMessage.subarray(HEADER_SIZE);
 
-  // Virtual IPs come only from client route-sync reports (updatePeerInfo).
-  // Relayed Data payloads are end-to-end encrypted, so sniffing addresses
-  // from them would learn ciphertext garbage and poison route broadcasts.
+  // Virtual IPs are learned from the source address of validated plaintext
+  // IPv4 data packets (looksLikeIpv4 rejects ciphertext garbage and public
+  // addresses). Without this the relay cannot publish routes and clients have
+  // no fallback when their direct link dies. Client route-sync reports remain
+  // authoritative (learnVirtualIp refuses to overwrite them).
   const isIpv4Packet = header.packetType === PacketType.Data && looksLikeIpv4(payload);
+  if (isIpv4Packet && sourceWs && sourceWs.peerId) {
+    const srcIp = payload.readUInt32BE(12);
+    try {
+      if (pm.learnVirtualIp(groupKey, sourceWs.peerId, srcIp)) {
+        pm.broadcastRouteUpdate(types, groupKey, undefined, { forceFull: true });
+      }
+    } catch (e) {
+      console.error(`learnVirtualIp failed: ${e.message}`);
+    }
+  }
 
   let targetPeerId = header.toPeerId;
   let targetWs = pm.getPeerWs(targetPeerId, groupKey);
