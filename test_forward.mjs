@@ -29,39 +29,40 @@ function dataMsg(from, to, src, dst) {
   const h = createHeader(from, to, PacketType.Data, payload.length);
   return [Buffer.concat([h, payload]), { fromPeerId: from, toPeerId: to, packetType: PacketType.Data, len: payload.length }];
 }
+// Virtual IPs enter the relay only through client route-sync reports.
+pm.updatePeerInfo('g', 111, { peerId: 111, ipv4Addr: { addr: ip('10.144.144.2') }, networkLength: 24, version: 1 });
+pm.updatePeerInfo('g', 333, { peerId: 333, ipv4Addr: { addr: ip('10.144.144.3') }, networkLength: 24, version: 1 });
 
-// 1. A 发数据到 B 的旧 ID(222)，目的 IP 未学习 -> 数据不投递，但学到 A 的 IP
-let [m1, h1] = dataMsg(111, 222, '10.144.144.2', '10.144.144.3');
-handleForwarding(A, h1, m1, types, pm);
-console.log('T1 A 的虚拟 IP 被学习:', pm.getPeerIdByIp('g', ip('10.144.144.2')) === 111);
-console.log('T2 目的未学习时数据不投递:', !B.sent.some(b => b.equals(m1)));
+// 1. 按 peer id 正常投递
+let [m1, h1] = dataMsg(333, 111, '10.144.144.3', '10.144.144.2');
+handleForwarding(B, h1, m1, types, pm);
+console.log('T1 按 peer id 投递:', A.sent.some(b => b.equals(m1)));
 
-// 2. B 发数据（源 .3）-> 学到 B 的 IP，且 A 正常收到
-let [m2, h2] = dataMsg(333, 111, '10.144.144.3', '10.144.144.2');
-handleForwarding(B, h2, m2, types, pm);
-console.log('T3 B 的虚拟 IP 被学习:', pm.getPeerIdByIp('g', ip('10.144.144.3')) === 333);
-console.log('T4 A 收到 B 的包:', A.sent.length > 0);
-
-// 3. A 再发旧 ID 222 -> 按目的 IP 兜底解析到 333 并投递
+// 2. 旧 peer id + 明文目的 IP -> 按上报地址兜底投递
 const before = B.sent.length;
-handleForwarding(A, h1, m1, types, pm);
-console.log('T5 旧 ID 按目的 IP 兜底投递:', B.sent.length === before + 1);
+let [m2, h2] = dataMsg(111, 222, '10.144.144.2', '10.144.144.3');
+handleForwarding(A, h2, m2, types, pm);
+console.log('T2 旧 ID 按目的 IP 兜底投递:', B.sent.length === before + 1);
 
-// 4. 路由广播里应包含带 IP 的 peer 信息（pushRouteUpdateTo 不抛错且发出内容）
-A.sent.length = 0;
-pm.broadcastRouteUpdate(types, 'g', undefined, { forceFull: true });
-console.log('T6 广播发出消息:', A.sent.length > 0 && B.sent.length > 0);
-
-// 5. 公网源地址的数据包不得被学习（防误嗅探污染路由）
+// 3. 目的 IP 未上报且 peer id 不存在 -> 不投递
 const C = fakeWs(555);
 pm.addPeer(555, C);
-const pubPayload = ipPacket(ip('80.207.42.254'), ip('10.144.144.2'));
-const hPub = { fromPeerId: 555, toPeerId: 111, packetType: PacketType.Data, len: pubPayload.length };
-handleForwarding(C, hPub, Buffer.concat([createHeader(555, 111, PacketType.Data, pubPayload.length), pubPayload]), types, pm);
-console.log('T7 公网源地址不被学习:', pm.getPeerIdByIp('g', ip('80.207.42.254')) === null);
+let [m3, h3] = dataMsg(555, 999, '10.144.144.9', '10.144.144.8');
+handleForwarding(C, h3, m3, types, pm);
+console.log('T3 未知目的不投递:', A.sent.length === 1 && B.sent.length === before + 1);
 
-// 6. 客户端上报的地址优先于嗅探值
-pm.updatePeerInfo('g', 555, { ...pm._getPeerInfosMap('g', true).get(555), ipv4Addr: { addr: ip('10.144.144.5') }, ipSource: 'report', version: 9 });
-const privPayload = ipPacket(ip('10.144.144.9'), ip('10.144.144.2'));
-handleForwarding(C, { fromPeerId: 555, toPeerId: 111, packetType: PacketType.Data, len: privPayload.length }, Buffer.concat([createHeader(555, 111, PacketType.Data, privPayload.length), privPayload]), types, pm);
-console.log('T8 上报地址不被嗅探覆盖:', pm.getPeerIdByIp('g', ip('10.144.144.5')) === 555 && pm.getPeerIdByIp('g', ip('10.144.144.9')) === null);
+// 4. 数据面不再嗅探地址：未上报过 IP 的 peer 发任何包都不会获得地址映射
+let [m4, h4] = dataMsg(555, 111, '10.144.144.9', '10.144.144.2');
+handleForwarding(C, h4, m4, types, pm);
+console.log('T4 不再嗅探源地址:', pm.getPeerIdByIp('g', ip('10.144.144.9')) === null);
+
+// 5. 密文样载荷（非合法 IP 头）不影响兜底逻辑、不产生映射
+const cipher = Buffer.alloc(24, 0xab);
+const hC = { fromPeerId: 555, toPeerId: 999, packetType: PacketType.Data, len: cipher.length };
+handleForwarding(C, hC, Buffer.concat([createHeader(555, 999, PacketType.Data, cipher.length), cipher]), types, pm);
+console.log('T5 密文载荷被安全忽略:', true);
+
+// 6. 路由广播正常发出
+A.sent.length = 0; B.sent.length = 0;
+pm.broadcastRouteUpdate(types, 'g', undefined, { forceFull: true });
+console.log('T6 广播发出消息:', A.sent.length > 0 && B.sent.length > 0);
