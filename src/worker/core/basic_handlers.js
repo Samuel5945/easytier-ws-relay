@@ -110,7 +110,9 @@ export function handleHandshake(ws, header, payload, types, pm, networkDigestReg
         groupKey: ws.groupKey,
         domainName: ws.domainName,
         serverSessionId: ws.serverSessionId,
+        lastSeen: ws.lastSeen || Date.now(),
       });
+      ws.attachmentWrittenAt = Date.now();
     } catch (_) { }
 
     setTimeout(() => {

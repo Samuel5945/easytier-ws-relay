@@ -7,6 +7,14 @@ import { handleRpcReq, handleRpcResp } from './core/rpc_handler.js';
 import { PeerManager } from './core/peer_manager.js';
 import { randomU64String } from './core/crypto.js';
 
+// Stale-socket pruning: how often to check, and how long a silent client may
+// stay before its socket is considered dead and removed from the peer table.
+const STALE_CHECK_MS = 60_000;
+const STALE_TIMEOUT_MS = 150_000;
+// Do not rewrite the hibernation attachment on every packet; 30s granularity is
+// plenty for a 150s staleness threshold.
+const ATTACHMENT_REFRESH_MS = 30_000;
+
 export class RelayRoom {
   constructor(state, env) {
     this.state = state;
@@ -23,6 +31,34 @@ export class RelayRoom {
 
     // Restore sockets after hibernation to keep metadata
     this.state.getWebSockets().forEach((ws) => this._restoreSocket(ws));
+
+    // Periodic stale-socket pruning. A killed client leaves its WebSocket
+    // behind (its close is never delivered), so the relay would keep
+    // broadcasting the dead peer as a second node with the same virtual IP.
+    this.state.storage.setAlarm(Date.now() + STALE_CHECK_MS).catch(() => { });
+  }
+
+  // Prune sockets whose client stopped sending. Live EasyTier clients ping
+  // every few seconds, so a silent socket means the process is gone.
+  async alarm() {
+    const now = Date.now();
+    let pruned = 0;
+    for (const ws of this.state.getWebSockets()) {
+      const meta = ws.deserializeAttachment ? (ws.deserializeAttachment() || {}) : {};
+      const last = ws.lastSeen || meta.lastSeen || 0;
+      if (last && now - last > STALE_TIMEOUT_MS) {
+        try { this.peerManager.removePeer(ws); } catch (_) { }
+        try { ws.close(1000, 'stale'); } catch (_) { }
+        pruned++;
+      }
+    }
+    if (pruned) {
+      console.log(`[alarm] pruned ${pruned} stale socket(s)`);
+      try {
+        this.peerManager.broadcastRouteUpdate(this.types, undefined, undefined, { forceFull: true });
+      } catch (_) { }
+    }
+    this.state.storage.setAlarm(Date.now() + STALE_CHECK_MS).catch(() => { });
   }
 
   async fetch(request) {
@@ -63,6 +99,7 @@ export class RelayRoom {
       }
       console.log(`[ws] recv len=${buffer.length}`);
       ws.lastSeen = Date.now();
+      this._refreshAttachment(ws);
       const header = parseHeader(buffer);
       if (!header) {
         console.error('[ws] parseHeader failed, raw hex=', buffer.toString('hex'));
@@ -139,16 +176,32 @@ export class RelayRoom {
     ws.peerId = meta.peerId || null;
     ws.groupKey = meta.groupKey || null;
     ws.domainName = meta.domainName || null;
-    ws.lastSeen = Date.now();
+    // Keep the last activity time the client reported; a restored socket must
+    // not look freshly active or stale pruning would never fire.
+    ws.lastSeen = meta.lastSeen || Date.now();
+    ws.attachmentWrittenAt = Date.now();
     ws.serverSessionId = meta.serverSessionId || randomU64String();
     ws.weAreInitiator = false;
     ws.crypto = { enabled: false };
+    this._writeAttachment(ws);
+  }
+
+  _writeAttachment(ws) {
     ws.serializeAttachment?.({
       peerId: ws.peerId,
       groupKey: ws.groupKey,
       domainName: ws.domainName,
       serverSessionId: ws.serverSessionId,
+      lastSeen: ws.lastSeen,
     });
+    ws.attachmentWrittenAt = Date.now();
+  }
+
+  // Persist lastSeen occasionally so staleness survives hibernation, without
+  // paying a serialization cost on every packet.
+  _refreshAttachment(ws) {
+    if (Date.now() - (ws.attachmentWrittenAt || 0) < ATTACHMENT_REFRESH_MS) return;
+    this._writeAttachment(ws);
   }
 
   _restoreSocket(ws) {
